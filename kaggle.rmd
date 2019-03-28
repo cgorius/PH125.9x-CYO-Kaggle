@@ -1,0 +1,270 @@
+---
+title: "Kaggle"
+author: "CG"
+date: "March 28, 2019"
+output: html_document
+abstract: "This report documents an analysis and prediction exercise aimed at minimizing the input variables require for maximum accuracy in order to improve the efficiency of estimating housing sale prices. "
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+##Importing required Libraries
+
+```{r warning=FALSE, error=FALSE}
+library(caret)
+library(tidyverse)
+library(dslabs)
+library(class)
+library(knitr)
+library(ggplot2)
+library(dplyr)
+library(randomForest)
+library(missForest)
+library(doParallel)
+library(e1071)
+```
+#Introduction
+
+The aim of this project is to develop a list of chosen independent variables from the Housing training data provided by Kaggle in order to produce a regression model with a high accuracy and a low validation error. The regression model will use the Housing data's independent variables in order to predict a house's Sale Price. The project aims to select a maximum of 20 from the original 79 independent variables in order to predict Sale Price. Data cleansing and manipulation are required considering the numerous independent variables of containing both numerical and categorical values. Once a set of optimal independent variables are determined, various regression models will be trained and tested in order to determine the most accurate when determining a houses' Sale Price.   
+ 
+##Importing the required Dataset
+  The following code assumes the data file is saved along the same path as the .rmd file.  It is important to change the path to the file if it is not saved appropraitely.  The data file used in this execise can be downloaded at https://www.kaggle.com/c/house-prices-advanced-regression-techniques/data it is the "train.csv" file.
+  
+```{r warning=FALSE}
+train_data <- read.table("..\train.csv",
+                         header = TRUE,
+                         sep=",",
+                         row.names="Id")
+```
+#Data Manipulation
+In this project only the training dataset provided by Kaggle is used. This project divides the training dataset into a sub training set containing 80% of the data and a sub validation set containing 20% of the data. This is done in order to calculate the regression model's accuracy and validation error This cannot be done with the original test dataset provided by Kaggle because it does not include the sale price of the observations so there would be no data to calculate the accuracy of the model's predictions with.  
+After some data exploration it is clear that not all the data is filled within the data set.  Using the missForest package a randomForest process was run repeatedly in order to determine the missing observation values and predict the NA values.
+
+##Organization and Manipulation
+  The data is separated and organized into various temporary variables in order to manipulate the data for appropriate analysis while maintaining the original set.
+```{r warning=FALSE}
+Sale_Price <- train_data$SalePrice
+train_data_temp <- train_data
+train_data_temp$SalePrice <- NULL
+cat_train <- select_if(train_data_temp, is.factor) 
+num_train <- select_if(train_data_temp, is.numeric) 
+```
+
+##Missing values
+  The missForest package is used to impute missing or NA values within a dataset, including datasets with both numerical and categorical data.  In order to save time the function can be run in parallel.
+
+```{r warning=FALSE}
+registerDoParallel(cores = 3)
+set.seed(120)
+all_data_mis <-  missForest(xmis = train_data_temp, maxiter = 10, ntree = 100, 
+                            variablewise = FALSE, decreasing = FALSE, 
+                            verbose = TRUE, 
+                            mtry = floor(sqrt(ncol(train_data_temp))), 
+                            replace = TRUE,
+                            classwt = NULL, cutoff = NULL, strata = NULL, 
+                            sampsize = NULL, nodesize = NULL, 
+                            maxnodes = NULL, xtrue = NA, 
+                            parallelize = "variables")
+all_dataM <- all_data_mis$ximp
+```
+
+#Change dataset to only numerical
+  In order to evaluate both numerical and categorical variables simultaneously the process of one hot encoding was used to alter the categorical variables into a numerical form that can be analyzed simultaneously with the original numerical variables. Using the 'dummyVars' function we are able to alter all of the categorical variables into numerical variables. Encoding the categorical variables into numerical changes the data set from 79 independent variables to 288.  Meaning that the original 43 categorical variables were expanded into 252 numerical variables.  From each original categorical variable a new variable is create with the category option type and is labeled as followed; *"Category.Option"*.
+  
+```{r warning=FALSE}
+dum <- dummyVars(~., data = all_dataM)
+alldata_ohe <- data.frame(predict(dum, newdata = all_dataM))
+alldata_ohe <- cbind(alldata_ohe, Sale_Price)
+```
+
+
+##Creating training and validation sets
+```{r warning=FALSE}
+rt <- sample(1:nrow(alldata_ohe), size = 0.2*nrow(alldata_ohe))
+val_set <- alldata_ohe[rt,]
+train_set <- alldata_ohe[-rt,]
+```
+
+#Modeling Approaches
+
+  After all data was transformed into numerical variables the following training models were used on the sub training set; 
+  * glm 
+  * lm
+  * knn
+  * kknn
+  * svmRadial
+  * svmRadialCost
+  * svmRadialSigma
+  * svmLinear
+ After training each model method the top 50 most important or influential variables are listed.  Recall that the categorical variables were expanded into each individual possibility existing as a binary.  It is because of this that when the names of top 50 variables from each model were recorded the categorical variable names were altered to represent the entire variable and not just that option of that category.  Recall that after the one hot encoding process the categorical variables were expanded into specific Category.Option form.  By removing the part of the name after and including the period the model will maintain the effects of the whole category. 
+  
+##Determining optimal variables and method
+```{r warning=FALSE}
+##glm method
+glm_method <- train(Sale_Price ~ ., method = "glm", data = train_set)
+results <- data_frame(method = "glm", RMSE = glm_method$results$RMSE , 
+                      Rsq = glm_method$results$Rsquared)
+cols_n <- varImp(glm_method)$importance %>% mutate(names=row.names(.)) %>% arrange(-Overall)
+top_list <- cols_n$names[1:50]
+top_list <- gsub("\\..*", "", top_list)
+
+## lm method 
+lm_method <- train(Sale_Price ~ ., method = "lm", data = train_set)
+#storing results
+results <- bind_rows(results, 
+                     data_frame(method = "lm",
+                                RMSE = lm_method$results$RMSE,
+                                Rsq = lm_method$results$Rsquared))
+cols_n <- varImp(lm_method)$importance %>% mutate(names=row.names(.)) %>% arrange(-Overall)
+top_list <- intersect(unique(top_list), 
+                      unique(gsub("\\..*", "", cols_n$names[1:50])))
+
+
+## knn method with control
+control <- trainControl(method = "cv", number = 10, p = 0.9)
+knn_method <- train(Sale_Price ~ .,
+                       method = "knn",
+                       data = train_set,
+                       tuneGrid = data.frame(k= seq(1, 49, 2)))
+results <- bind_rows(results, 
+                     data_frame(method = "knn",
+                                RMSE = knn_method$results$RMSE,
+                                Rsq = knn_method$results$Rsquared))
+cols_n <- varImp(knn_method)$importance %>% mutate(names=row.names(.)) %>% arrange(-Overall)
+top_list <- intersect(unique(top_list), 
+                      unique(gsub("\\..*", "", cols_n$names[1:50])))
+
+######kknn method 
+kknn_method <- train(Sale_Price ~ .,
+                    method = "kknn",
+                    data = train_set)
+results <- bind_rows(results, 
+                     data_frame(method = "kknn",
+                                RMSE = kknn_method$results$RMSE,
+                                Rsq = kknn_method$results$Rsquared))
+cols_n <- varImp(kknn_method)$importance %>% mutate(names=row.names(.)) %>% arrange(-Overall)
+top_list <- intersect(unique(top_list), 
+                      unique(gsub("\\..*", "", cols_n$names[1:50])))
+
+
+####svmRadial method 
+svmR_method <- train(Sale_Price ~ ., method = "svmRadial", data = train_set)
+results <- bind_rows(results, 
+                     data_frame(method = "svmRadial",
+                                RMSE = svmR_method$results$RMSE,
+                                Rsq = svmR_method$results$Rsquared))
+cols_n <- varImp(svmR_method)$importance %>% mutate(names=row.names(.)) %>% arrange(-Overall)
+top_list <- intersect(unique(top_list), 
+                      unique(gsub("\\..*", "", cols_n$names[1:50])))
+ 
+#svmRadial squared method 
+svmRS_method <- train(Sale_Price ~ ., method = "svmRadialSigma", 
+                      data = train_set)
+results <- bind_rows(results, 
+                     data_frame(method = "svmRadialSigma",
+                                RMSE = svmRS_method$results$RMSE,
+                                Rsq = svmRS_method$results$Rsquared))
+cols_n <- varImp(svmRS_method)$importance %>% mutate(names=row.names(.)) %>% arrange(-Overall)
+top_list <- intersect(unique(top_list), 
+                      unique(gsub("\\..*", "", cols_n$names[1:50])))
+
+#svmRadial Cost method 
+svmRC_method <- train(Sale_Price ~ ., method = "svmRadialCost" ,
+                      data = train_set)
+results <- bind_rows(results, 
+                     data_frame(method = "svmRadialCost",
+                                RMSE = svmRC_method$results$RMSE,
+                                Rsq = svmRC_method$results$Rsquared))
+cols_n <- varImp(svmRC_method)$importance %>% mutate(names=row.names(.)) %>% arrange(-Overall)
+top_list <- intersect(unique(top_list), 
+                      unique(gsub("\\..*", "", cols_n$names[1:50])))
+
+#svmLinear  method 
+svmL_method <- train(Sale_Price ~ ., method = "svmLinear", data = train_set)
+results <- bind_rows(results, 
+                     data_frame(method = "svmLinear",
+                                RMSE = svmL_method$results$RMSE,
+                                Rsq = svmL_method$results$Rsquared))
+cols_n <- varImp(svmL_method)$importance %>% mutate(names=row.names(.)) %>% arrange(-Overall)
+top_list <- intersect(unique(top_list), 
+                      unique(gsub("\\..*", "", cols_n$names[1:50])))
+```
+
+##Optimal variables
+  The following output is the results of each training method performed and their RMSE and R^2 values in order to determine which methods fit the data best before predictions.  Following that is the list final list variables determined as the optimal variables for predicting the house's Sale Price.
+```{r warning=FALSE, echo=FALSE}
+results
+top_list
+```
+
+##Creating optimal dataset
+ The dataset includes the original variables, categorical and numerical The same one hot encoding process was used on the optimal set's categorical variables. The optimal data set was then used to train the final model. Three final models were designed  using the optimal variables dataset.Each model was analyzed and compared to the validation set to determine the one with the greatest accuracy and lowest validation error. It should be noted that the sub validation set contains all 288 variables, numerical and expanded categorical. 
+```{r warning=FALSE}
+optimal_ts <- train_data[ ,which(colnames(train_data) %in% top_list)]
+
+registerDoParallel(cores = 3)
+set.seed(120)
+opt_mis <-  missForest(xmis = optimal_ts, maxiter = 10, ntree = 100, 
+                       variablewise = FALSE, decreasing = FALSE, verbose = TRUE,
+                       mtry = floor(sqrt(ncol(optimal_ts))), replace = TRUE,
+                       classwt = NULL, cutoff = NULL, strata = NULL, 
+                       sampsize = NULL, nodesize = NULL, maxnodes = NULL, 
+                       xtrue = NA, parallelize = "variables")
+optM <- opt_mis$ximp
+```
+
+#Changing categorical variables to numerical in the optimal set
+Since 8 of the 17 variables are categorical, the one hot encoding process was used again to convert them into numerical values. 
+```{r warning=FALSE}
+dum <- dummyVars(~., data = optM)
+optdata_ohe <- data.frame(predict(dum, newdata = all_dataM))
+optdata_ohe <- cbind(optdata_ohe, Sale_Price)
+```
+
+##Training optimal methods and predicting aginst the validation set
+ The three best models from the first set of regression models were; glm, lm, and svmLinear.  After retraining each model with the optimal data set, each was used to predict the Sale Price of the sub validation set of data.
+```{r warning=FALSE}
+#glm method
+opt_glm <- train(Sale_Price ~ ., method = "glm", data = optdata_ohe)
+glm_pred <- predict(opt_glm, val_set, type = "raw")
+opt_res <- data_frame(method = "glm", 
+                      RMSE = opt_glm$results$RMSE, 
+                      Rsq = opt_glm$results$Rsquared,
+                      val_er = mean(abs(glm_pred - val_set$Sale_Price)),
+                      Acc = (1 - (val_er/mean(val_set$Sale_Price))))
+#lm method
+opt_lm <- train(Sale_Price ~ ., method = "lm", data = optdata_ohe)
+lm_pred <- predict(opt_lm, val_set, type = "raw")
+opt_res <- bind_rows(opt_res, 
+                     data_frame(method = "lm",
+                                RMSE = opt_lm$results$RMSE, 
+                                Rsq = opt_lm$results$Rsquared,
+                                val_er = mean(abs(lm_pred - val_set$Sale_Price)),
+                                Acc = (1 - (val_er/mean(val_set$Sale_Price)))))
+#svm Linear method
+grid <- expand.grid(C = seq(0, 2, 0.1))
+ctrl <- trainControl(method = "cv", number = 10, p = 0.9)
+set.seed(789)
+opt_svmL <- train(Sale_Price ~ ., method = "svmLinear", data = optdata_ohe,
+                  trControl = ctrl,
+                  tuneGrid = grid)
+svmL_pred <- predict(opt_svmL, val_set, type = "raw")
+opt_res <- bind_rows(opt_res, 
+                     data_frame(method = "svmLinear", 
+                                RMSE = opt_svmL$results$RMSE, 
+                                Rsq = opt_svmL$results$Rsquared,
+                                val_er = mean(abs(svmL_pred - val_set$Sale_Price)),
+                                Acc = (1 - (val_er/mean(val_set$Sale_Price)))))
+```
+
+##Method results
+The parameters used to determine the optimal prediction method for Sale Price based on the data are RMSE, R squared,  the mean validation error, and accuracy of the models. The Root Mean Squared Error is the standard deviation of the prediction errors. This is a goodness of fit test meaning it represents the regression model's average deviation from the data it was modeled after. The R squared is a scaled representation of RMSE.  Meaning it to is only a goodness of fit test, representing how well the regression model fits the data it was modeled after. The Average Validation Error is the mean of the residuals between the predicted output values and the actual observed output values.  This metric observes a regression models' ability to predict a value from an observation that was not used to create the model. The Accuracy value is a relative metric to demonstrate a regression models' ability to make predictions of an output value based on an observation not used to create the model. In this case it an be considered a scaled measurement of the average validation error. 
+ 
+```{r echo=FALSE}
+opt_res
+opt_svmL$finalModel
+```
+
+
